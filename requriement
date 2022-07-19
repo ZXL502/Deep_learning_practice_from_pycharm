@@ -1,0 +1,11 @@
+python : 3.7
+pytorch : 1.11 +cu113
+CUDA : 11.3
+
+'''package'''
+dl2
+torch
+numpy
+pandas
+random
+matlip
