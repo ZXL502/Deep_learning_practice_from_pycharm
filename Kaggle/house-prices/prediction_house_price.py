@@ -1,4 +1,4 @@
-import hashlib
+import hashlib   # 哈希加密库
 import os
 import tarfile
 import zipfile
@@ -22,7 +22,7 @@ def download(name, cashe_dir=os.path.join('..', 'data')):
     '''download the dataset'''
     assert name in DATA_HUB, f"{name}不存在于{DATA_HUB}"
     url, sha1_hash = DATA_HUB[name]
-    os.makedirs(cashe_dir, exist_ok = True)
+    os.makedirs(cashe_dir, exist_ok = True)  #创建目录
     fname = os.path.join(cashe_dir, url.split('/'[-1]))
     if os.path.exists(fname):
         sha1 = hashlib.sha1()
@@ -63,16 +63,19 @@ def download_all():
 
 train_data = pd.read_csv('./house-prices-advanced-regression-techniques/train.csv')
 test_data = pd.read_csv('./house-prices-advanced-regression-techniques/test.csv')
+
 #print(train_data.iloc[0:4, [0,1,2,3,-3,-2,-1]])
 #because the Id is not necessary, so delte it
+
 all_features = pd.concat((train_data.iloc[:, 1:-1], test_data.iloc[:, 1: ]))
 
+# the last column is predicted, so needn't that one on the dataset.
 #stantard-normalization x: (x-miu)/zgma
 # it proves convient for optmization.
-# because we don't knowa priori whichfeatures will be relevant, we do not want to penalize coefficients
+# because we don't knowa priori which features will be relevant, we do not want to penalize coefficients
 # assigned to onefeature norethan any other
 
-# 若无法获得测试数据，则可根据训练数据计算均值和标准差
+# 若无法获得测试数据，则可根据训练数据计算均值和标准差，对 all_features中，numeric_features
 numeric_features = all_features.dtypes[all_features.dtypes != 'object'].index
 all_features[numeric_features] = all_features[numeric_features].apply(
     lambda x: (x - x.mean()) / (x.std()))
@@ -82,7 +85,7 @@ all_features[numeric_features] = all_features[numeric_features].fillna(0)
 # “Dummy_na=True”将“na”（缺失值）视为有效的特征值，并为其创建指示符特征  (2919, 311)
 all_features = pd.get_dummies(all_features, dummy_na=True)
 
-n_train = train_data.shape[0] #1460
+n_train = train_data.shape[0] # 1460
 train_features = torch.tensor(all_features[:n_train].values, dtype=torch.float32)
 test_features = torch.tensor(all_features[n_train:].values, dtype=torch.float32)
 train_labels = torch.tensor(
