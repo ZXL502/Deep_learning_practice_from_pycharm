@@ -44,6 +44,7 @@ class Mlp(nn.Module):
 
 def window_partition(x, window_size):
     """
+    # the feature map is partitioned to the non-overlapping window based on window_size
     Args:
         x: (B, H, W, C)
         window_size (int): window size
@@ -53,6 +54,8 @@ def window_partition(x, window_size):
     """
     B, H, W, C = x.shape
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    # permute: [B, H//M, M, W//M , M ,C] -> [B, H//M, W//M, M ,M ,C]
+    # view: [B, H//M, W//M, M ,M ,C] -> [B * num_windows, M_h, M_w, C]
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
     return windows
 
@@ -69,7 +72,10 @@ def window_reverse(windows, window_size, H, W):
         x: (B, H, W, C)
     """
     B = int(windows.shape[0] / (H * W / window_size / window_size))
+    # view: [B * num_windows, M_h, M_w, C] -> [B, H//M, W//M, M ,C]
     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    # permute: [B, H//M, W//M, M , M ,C] -> [B, H//M, M, W//M, M ,C]
+    # view: [B, H//M, M, W//M, M ,C] -> [B, H, W, -1]
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
@@ -128,20 +134,32 @@ class WindowAttention(nn.Module):
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
+        # [batch_size*num_windows, Mh*Mw, total_embed_dim]
         B_, N, C = x.shape
+        # qkv(): -> [batch_size*num_windows, Mh*Mw, 3 * total_embed_dim]
+        # reshape: -> [batch_size*num_windows, Mh*Mw, 3, num_heads, embed_dim_per_head]
+        # permute: -> [3, batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head]
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        # [batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head]
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
-        q = q * self.scale
+
+        # transpose: -> [batch_size*num_windows, num_heads, embed_dim_per_head, Mh*Mw]
+        # @: multiply -> [batch_size*num_windows, num_heads, Mh*Mw, Mh*Mw]
+        q = q * self.scale # 1/sqr(d)
         attn = (q @ k.transpose(-2, -1))
 
+        # view: [Mh*Mw*Mh*Mw, nH] -> [Mh*Mw, Mh*Mw, nH]
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        attn = attn + relative_position_bias.unsqueeze(0)
+        attn = attn + relative_position_bias.unsqueeze(0) # add batch_size
 
         if mask is not None:
+            # mask: [nW, Mh*Mw, Mh*Mw]
             nW = mask.shape[0]
+            # attn.view: [batch_size, num_windows, num_heads, Mh*Mw, Mh*Mw]
+            # mask.unsqueeze: [1, nW, 1 , Mh*Mh, Mh*Mw]
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
             attn = self.softmax(attn)
@@ -150,6 +168,9 @@ class WindowAttention(nn.Module):
 
         attn = self.attn_drop(attn)
 
+        # @: multiple -> [batch_size*num_windows, nim_heads, Mh*Mw, embed_dim_per_head]
+        # transpose: -> [batch_size*num_windows,  Mh*Mw, nim_heads,embed_dim_per_head]
+        # reshape: -> [batch_size*num_windows, Mh*Mw, total_embed_dim]
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -222,6 +243,7 @@ class SwinTransformerBlock(nn.Module):
         if self.shift_size > 0:
             # calculate attention mask for SW-MSA
             H, W = self.input_resolution
+            # the sequence is smae with the feature map for widow_partition
             img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
             h_slices = (slice(0, -self.window_size),
                         slice(-self.window_size, -self.shift_size),
@@ -236,8 +258,9 @@ class SwinTransformerBlock(nn.Module):
                     cnt += 1
 
             mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
-            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            mask_windows = mask_windows.view(-1, self.window_size * self.window_size) # [nW, Mh*Mw]
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2) # [nW, 1, Mh*Mw]- [nW, Mh*Mw, 1] : broadcast
+            # [nW, Mh*Mw, Mh*Mw]
             attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
         else:
             attn_mask = None
@@ -273,7 +296,7 @@ class SwinTransformerBlock(nn.Module):
         attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C) # [nW*B,Mh,Mw,C]
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -338,8 +361,19 @@ class PatchMerging(nn.Module):
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
 
         x = x.view(B, H, W, C)
+        '''
+        # for multiscale
+        # padding
+        # if the H, W from feature map are not an integer multiple of 2 
+        pad_input = (H % 2 == 1) or (w % 2 == 1)
+        if pad_input:
+            # to pad the last 3 dimensions, starting from the last dimension and moving forward.
+            #(C_front, C_back, W_left, W_right, H_top, H_nottom)
+            x = F.pad(x, (0, 0, 0, w % 2
+            0, H % 2))
+        '''
 
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C , step = 2
         x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
         x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
         x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
@@ -347,7 +381,7 @@ class PatchMerging(nn.Module):
         x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
 
         x = self.norm(x)
-        x = self.reduction(x)
+        x = self.reduction(x) # [B, H/2*W/2, 2*C]
 
         return x
 
@@ -448,7 +482,7 @@ class PatchEmbed(nn.Module):
     def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
         img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
+        patch_size = to_2tuple(patch_size) # (patch_size, patch_size)
         patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
         self.img_size = img_size
         self.patch_size = patch_size
@@ -473,6 +507,28 @@ class PatchEmbed(nn.Module):
         if self.norm is not None:
             x = self.norm(x)
         return x
+    '''
+    # for multiscale
+    def forward(self, x):
+        _,_, H, W = x.shape
+        
+        # padding
+        pad_input = (H % self.patch_size[0] != 0) or (w % self.patch_size[1] != 0)
+        if pad_input:
+            # to pad the last 3 dimensions,
+            #(W_left, W_right, H_top, H_nottom, C_front, C_back)
+            x = F.pad(0, self.patch_size[1]- W % self.patch_size[1],
+            0, self.patch_size[0]- H % self.patch_size[0],
+            0, 0)
+        # downsample patch_size
+        x = self.proj(x)
+        _, _, H, W = x.shape
+        # flatten: [B, C, H, W] -> [B, C, HW]
+        # transpose: [B, C, HW] -> [B, HW, C]
+        x = x.flatten(2).transpose(1, 2)
+        x = self.norm(x)
+        return x, H, W
+    '''
 
     def flops(self):
         Ho, Wo = self.patches_resolution
@@ -488,12 +544,12 @@ class SwinTransformer(nn.Module):
           https://arxiv.org/pdf/2103.14030
 
     Args:
-        img_size (int | tuple(int)): Input image size. Default 224
+        img_size (int | tuple(int)): Input image size. Default 224  if you need the function of multiscale, delete this when coded
         patch_size (int | tuple(int)): Patch size. Default: 4
         in_chans (int): Number of input image channels. Default: 3
         num_classes (int): Number of classes for classification head. Default: 1000
-        embed_dim (int): Patch embedding dimension. Default: 96
-        depths (tuple(int)): Depth of each Swin Transformer layer.
+        embed_dim (int): Patch embedding dimension. Default: 96  C
+        depths (tuple(int)): Depth of each Swin Transformer layer. the block
         num_heads (tuple(int)): Number of attention heads in different layers.
         window_size (int): Window size. Default: 7
         mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
@@ -522,6 +578,7 @@ class SwinTransformer(nn.Module):
         self.embed_dim = embed_dim
         self.ape = ape
         self.patch_norm = patch_norm
+        # the channels from output of stage4
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.mlp_ratio = mlp_ratio
 
@@ -545,6 +602,7 @@ class SwinTransformer(nn.Module):
 
         # build layers
         self.layers = nn.ModuleList()
+        # here is different from paper, the patch_erging is not this stage but the next one
         for i_layer in range(self.num_layers):
             layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
                                input_resolution=(patches_resolution[0] // (2 ** i_layer),
@@ -586,6 +644,7 @@ class SwinTransformer(nn.Module):
         return {'relative_position_bias_table'}
 
     def forward_features(self, x):
+        # x: [B, L, C] L: H X W
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
@@ -612,3 +671,4 @@ class SwinTransformer(nn.Module):
         flops += self.num_features * self.patches_resolution[0] * self.patches_resolution[1] // (2 ** self.num_layers)
         flops += self.num_features * self.num_classes
         return flops
+
