@@ -112,17 +112,18 @@ class WindowAttention(nn.Module):
         coords_w = torch.arange(self.window_size[1])
         coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        # 2， Wh*Ww, 0 - 2, 0, Wh*Ww
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
         relative_coords[:, :, 1] += self.window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1  # ?
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-        self.register_buffer("relative_position_index", relative_position_index)
+        self.register_buffer("relative_position_index", relative_position_index) # access unto the cash
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(dim, dim) # multi-head
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
@@ -339,7 +340,7 @@ class PatchMerging(nn.Module):
     r""" Patch Merging Layer.
 
     Args:
-        input_resolution (tuple[int]): Resolution of input feature.
+        input_resolution (tuple[int]): Resolution of input feature. M/2**i  i from num_layer
         dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
@@ -353,7 +354,7 @@ class PatchMerging(nn.Module):
 
     def forward(self, x):
         """
-        x: B, H*W, C
+        x: B, H*W, C  # after Flattened
         """
         H, W = self.input_resolution
         B, L, C = x.shape
@@ -481,16 +482,16 @@ class PatchEmbed(nn.Module):
 
     def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
-        img_size = to_2tuple(img_size)
+        img_size = to_2tuple(img_size) # 224, 224
         patch_size = to_2tuple(patch_size) # (patch_size, patch_size)
-        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]] # 56,56
         self.img_size = img_size
         self.patch_size = patch_size
-        self.patches_resolution = patches_resolution
-        self.num_patches = patches_resolution[0] * patches_resolution[1]
+        self.patches_resolution = patches_resolution # 56, 56
+        self.num_patches = patches_resolution[0] * patches_resolution[1] # 56*56
 
         self.in_chans = in_chans
-        self.embed_dim = embed_dim
+        self.embed_dim = embed_dim # 96
 
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         if norm_layer is not None:
@@ -531,7 +532,7 @@ class PatchEmbed(nn.Module):
     '''
 
     def flops(self):
-        Ho, Wo = self.patches_resolution
+        Ho, Wo = self.patches_resolution # 56*56
         flops = Ho * Wo * self.embed_dim * self.in_chans * (self.patch_size[0] * self.patch_size[1])
         if self.norm is not None:
             flops += Ho * Wo * self.embed_dim
@@ -566,7 +567,7 @@ class SwinTransformer(nn.Module):
     """
 
     def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
-                 embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
+                 embed_dim=96, depths=(2, 2, 6, 2), num_heads=(3, 6, 12, 24),
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
@@ -576,7 +577,7 @@ class SwinTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
-        self.ape = ape
+        self.ape = ape # about position flase: absolute position
         self.patch_norm = patch_norm
         # the channels from output of stage4
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
@@ -586,7 +587,7 @@ class SwinTransformer(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
             norm_layer=norm_layer if self.patch_norm else None)
-        num_patches = self.patch_embed.num_patches
+        num_patches = self.patch_embed.num_patches # 56*56
         patches_resolution = self.patch_embed.patches_resolution
         self.patches_resolution = patches_resolution
 
