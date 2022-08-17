@@ -127,6 +127,7 @@ class WindowAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
+        # dim = -1 every rows
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, mask=None):
