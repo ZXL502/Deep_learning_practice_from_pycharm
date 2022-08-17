@@ -179,6 +179,7 @@ class Visiontransformer(nn.Module):
          )
         self.norm_layer = norm_layer(embed_dim)
 
+        # representation layer for pre-logist
         if representation_size:
             self.has_logits = True
             self.num_features = representation_size
@@ -247,7 +248,6 @@ def vit_base_patch16_224(num_classes: int = 1000):
                               representation_size=None,
                               num_classes=num_classes)
     return model
-
 
 
 
