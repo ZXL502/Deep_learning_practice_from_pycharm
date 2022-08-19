@@ -10,7 +10,7 @@ from torchvision import transforms
 
 
 from my_dataset import MyDataSet
-from vit_model import vit_base_patch16_224_in21k as create_model
+from ViT import vit_base_patch16_224_in21k as create_model
 from utils import read_split_data, train_one_epoch, evaluate
 
 
@@ -61,7 +61,7 @@ def main(args):
                                              num_workers=nw,
                                              collate_fn=val_dataset.collate_fn)
 
-    model = create_model(num_classes=5, has_logits=False).to(device)
+    model = create_model(num_classes= 5, has_logits=False).to(device)
 
     if args.weights != "":
         assert os.path.exists(args.weights), "weights file: '{}' not exist.".format(args.weights)
@@ -124,7 +124,7 @@ if __name__ == '__main__':
     # 数据集所在根目录
     # https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz
     parser.add_argument('--data-path', type=str,
-                        default="/data/flower_photos")
+                        default="D:/Deep_learning_code_test/transformer/vision_transformer/data/flower_photos")
     parser.add_argument('--model-name', default='', help='create model name')
 
     # 预训练权重路径，如果不想载入就设置为空字符

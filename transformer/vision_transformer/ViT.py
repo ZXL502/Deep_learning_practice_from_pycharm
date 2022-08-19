@@ -46,27 +46,29 @@ class patch_embed(nn.Module):
         self.image_size = image_size
         self.patch_size = patch_size
         self.patches_resolution = patches_resolution
-        self.num_patch = patches_resolution[0] * patches_resolution[1]
+        self.num_patches = patches_resolution[0] * patches_resolution[1]
 
         self.proj = nn.Conv2d(in_c, em_dim, kernel_size=patch_size,stride=patch_size)
         self.norm = norm_layer(em_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
-        B, C, H, W = x.shape()
+        B, C, H, W = x.shape
         assert H == self.image_size[0] & W == self.image_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x).Flatten(2).transpose(1,2) # B,H*W, C
+        x = self.proj(x).flatten(2).transpose(1,2) # B,H*W, C
         if self.norm is not None:
             x = self.norm(x)
         return x
 
 
 class MLP(nn.Module):
-    def __init__(self, ff_input, ff_hiden, ff_output, act_layer = nn.GELU, drop = 0.):
+    def __init__(self, in_features, hidden_features = None, out_features = None, act_layer = nn.GELU, drop = 0.):
         super(MLP, self).__init__()
-        self.fc = nn.Linear(ff_input, ff_hiden)
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc = nn.Linear(in_features, hidden_features)
         self.act = act_layer()
-        self.fc1 = nn.Linear(ff_hiden,ff_output)
+        self.fc1 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
@@ -96,7 +98,7 @@ class Attention(nn.Module):
         self.dim = per_dim
         self.qkv = nn.Linear(dim, 3 * dim)
         self.bias = qkv_bias
-        self.scale = qk_scale
+        self.scale = qk_scale or per_dim ** -0.5
         self.atten_drop = nn.Dropout(attn_drop_ratio)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop_ratio)
@@ -104,13 +106,13 @@ class Attention(nn.Module):
 
     def forward(self, x):
         # batch_size, num_patches + 1. total_embed_dim
-        B, N, C = x.shape()
+        B, N, C = x.shape
         # B, N, 3, 8, per_embed_dim
         # 3, B, 8, N, per_embed_dim
         qkv = self.qkv(x).reshape(B, N, 3, self.num_head, C // self.num_head).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         # @: multiply -> [batch_size, num_heads, num_patches + 1, num_patches + 1]
-        x_ = (q @ k.transpose[2, 3]) * self.scale
+        x_ = (q @ k.transpose(2, 3)) * self.scale
         x_ = x_.softmax(dim= -1)
         x_ = self.atten_drop(x_)
 
@@ -136,17 +138,17 @@ class Block(nn.Module):
                  norm_layer=nn.LayerNorm
                  ):
         super(Block, self).__init__()
-        self.norm = norm_layer
+        self.norm = norm_layer(dim)
         self.attention = Attention(dim, num_heads, qkv_bias, qk_scale, attn_drop_ratio, drop_ratio)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path_ratio) if drop_path_ratio > 0. else nn.Identity()
-        self.norm1 = norm_layer
-        mlp_hidden = (dim * mlp_ratio)
-        self.mlp = MLP(ff_input=dim, ff_hiden=mlp_hidden, ff_output= dim, act_layer=act_layer,drop=drop_ratio)
+        self.norm1 = norm_layer(dim)
+        mlp_hidden = int(dim * mlp_ratio)
+        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden, act_layer=act_layer, drop=drop_ratio)
 
     def forward(self, x):
-        x = x+ self.drop_path(self.attention(self.norm(x)))
-        x = x+ self.drop_path(self.mlp(self.norm1(x)))
+        x = x + self.drop_path(self.attention(self.norm(x)))
+        x = x + self.drop_path(self.mlp(self.norm1(x)))
         return x
 
 
@@ -160,22 +162,23 @@ class Visiontransformer(nn.Module):
                  ):
         super(Visiontransformer, self).__init__()
         self.number_class = num_classes
-        self.number_feature = self.embed_dim = embed_dim
-        self.num_pateches = img_size**2 // patch_size**2
-        self.patch_embed = embed_layer(image_size=img_size, patch_size=patch_size,
-                                        in_c=in_c, em_dim=embed_dim, norm_layer=norm_layer)
-        self.class_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.position_embed = nn.Parameter(torch.zeros(1, 1+ self.num_pateches, embed_dim ))
+        self.num_features = self.embed_dim = embed_dim
         self.pos_drop = nn.Dropout(drop_ratio)
         act_layer = act_layer or nn.GELU
         norm_layer = norm_layer or partial(nn.LayerNorm, eps = 1e-6)
+        self.patch_embed = embed_layer(image_size=img_size, patch_size=patch_size,
+                                       in_c=in_c, em_dim=embed_dim, norm_layer=norm_layer)
+        num_pateches = self.patch_embed.num_patches
+
+        self.class_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.position_embed = nn.Parameter(torch.zeros(1, 1 + num_pateches, embed_dim))
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_ratio, depth)]
 
         self.block = nn.Sequential(
              *[Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
           drop_ratio=drop_ratio, attn_drop_ratio=attn_drop_ratio, drop_path_ratio=dpr[i],
-          norm_layer=norm_layer, act_layer=act_layer) for i in range(depth)]
+          norm_layer = norm_layer, act_layer=act_layer) for i in range(depth)]
          )
         self.norm_layer = norm_layer(embed_dim)
 
@@ -203,14 +206,14 @@ class Visiontransformer(nn.Module):
         # x: B, C, H, W
         x = self.patch_embed(x) # B, 196, 768
         # [1, 1, 768] -> [B, 1, 768]
-        cls_token = self.cls_token.expand(x.shape[0], -1, -1)
+        cls_token = self.class_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_token, x), dim=1)
         x = self.pos_drop(x + self.position_embed)
         x = self.block(x)
         x = self.norm_layer(x)
         return self.pre_logits(x[:, 0])
 
-    def forward(self,x):
+    def forward(self, x):
         x = self.forward_future(x)
         x = self.head(x)
         return x
@@ -250,7 +253,21 @@ def vit_base_patch16_224(num_classes: int = 1000):
     return model
 
 
-
+def vit_base_patch16_224_in21k(num_classes: int = 21843, has_logits: bool = True):
+    """
+    ViT-Base model (ViT-B/16) from original paper (https://arxiv.org/abs/2010.11929).
+    ImageNet-21k weights @ 224x224, source https://github.com/google-research/vision_transformer.
+    weights ported from official Google JAX impl:
+    https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_patch16_224_in21k-e5005f0a.pth
+    """
+    model = Visiontransformer(img_size=224,
+                              patch_size=16,
+                              embed_dim=768,
+                              depth=12,
+                              num_heads=12,
+                              representation_size=768 if has_logits else None,
+                              num_classes=num_classes)
+    return model
 
 
 
